@@ -1,0 +1,56 @@
+{
+  "scoring_defaults": {
+    "weights": {
+      "token_cost": 0.5,
+      "qps": 0.1,
+      "latency": 0.2,
+      "accuracy": 0.2
+    },
+    "normalization_baseline": {
+      "token_cost_usd_per_1k": 0.002,
+      "qps": 40.0,
+      "latency_ms": 800.0,
+      "accuracy": 0.8
+    },
+    "burst_qps_threshold": 0.85,
+    "long_text_threshold_tokens": 16000
+  },
+  "providers": {
+    "deepseek": {
+      "base_url": "https://api.deepseek.com/chat/completions",
+      "env_key_name": "DEEPSEEK_API_KEY",
+      "models": {
+        "deepseek-chat": {
+          "in_price_1k": 0.00014,
+          "out_price_1k": 0.00028,
+          "supports_vision": false,
+          "supported_task_categories": ["code_generation", "summarization", "general_chat"]
+        },
+        "deepseek-reasoner": {
+          "in_price_1k": 0.00055,
+          "out_price_1k": 0.00219,
+          "supports_vision": false,
+          "supported_task_categories": ["code_generation", "summarization", "general_chat"]
+        }
+      }
+    },
+    "moonshot": {
+      "base_url": "https://api.moonshot.cn/v1/chat/completions",
+      "env_key_name": "KIMI_API_KEY",
+      "models": {
+        "moonshot-v1-8k": {
+          "in_price_1k": 0.0016,
+          "out_price_1k": 0.0016,
+          "supports_vision": false,
+          "supported_task_categories": ["code_generation", "summarization", "general_chat"]
+        },
+        "moonshot-v1-32k": {
+          "in_price_1k": 0.0033,
+          "out_price_1k": 0.0033,
+          "supports_vision": false,
+          "supported_task_categories": ["code_generation", "summarization", "general_chat"]
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,50 @@
+services:
+  # 核心账本数据库
+  postgres:
+    image: postgres:15-alpine
+    container_name: oracle_postgres
+    restart: always
+    environment:
+      POSTGRES_USER: oracle_user
+      POSTGRES_PASSWORD: oracle_password
+      POSTGRES_DB: oracle_db
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  # 高频节流与缓存层
+  redis:
+    image: redis:7-alpine
+    container_name: oracle_redis
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  # 👇 新增我们自己的 API 服务 👇
+  api:
+    build: .  # 告诉 Docker 用当前目录的 Dockerfile 构建镜像
+    container_name: oracle_api
+    ports:
+      - "8000:8000"
+    depends_on:
+      - postgres
+      - redis
+    environment:
+      # 核心：在这里覆盖 .env，把 127.0.0.1 换成容器的内部 DNS 名字
+      # 例如：postgres 是数据库容器的 DNS 名字，redis 是缓存容器的 DNS 名字
+      # docker-compose.yml 里 environment 节点下写的变量，会直接无视并强制覆盖 .env 文件里的同名变量
+      - DATABASE_URL=postgresql+asyncpg://oracle_user:oracle_password@postgres:5432/oracle_db
+      - REDIS_URL=redis://redis:6379/0
+      - AGENT_API_KEYS=${AGENT_API_KEYS}
+      - PROBE_PROXY=${PROBE_PROXY:-}
+      - KIMI_API_KEY=${KIMI_API_KEY:-}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+      # 如果上面你的 postgres 密码不一样，请按实际修改
+    restart: always
+
+volumes:
+  postgres_data:
+  redis_data:
