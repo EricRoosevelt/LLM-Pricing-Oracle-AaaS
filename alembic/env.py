@@ -13,7 +13,7 @@ import os
 sys.path.append(os.path.dirname(os.path.dirname(__file__))) # 把项目根目录加入环境变量，防止找不到 app
 from app.core.config import settings
 from app.core.database import Base
-import app.models.audit # ⚠️ 极其重要：必须导入一次模型，Alembic 才能扫描到它！
+import app.models.control_plane  # noqa: F401
 
 # this is the Alembic Config object, which provides
 # access to the values within the .ini file in use.

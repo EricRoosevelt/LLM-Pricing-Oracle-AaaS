@@ -1,0 +1,19 @@
+flowchart LR
+  Agent["AI Agent"] -->|decision request| API["Decision API"]
+  API --> Auth["Auth / Quota"]
+  API --> Catalog["Model Catalog"]
+  API --> Policy["Routing Policies"]
+  API --> Signals["Redis Signals"]
+  Catalog --> Engine["Scoring Engine"]
+  Policy --> Engine
+  Signals --> Engine
+  Engine --> Decision["Durable Decision + Fallback Ladder"]
+  Decision --> Agent
+  Agent -->|own vendor key| Provider["LLM Providers"]
+  Agent -->|outcome report| API
+  API --> DB["Postgres"]
+  API --> Streams["Redis Streams"]
+  Probe["Probe Worker"] --> Provider
+  Probe --> Signals
+  Consumer["Event Consumer"] --> DB
+  API --> Metrics["Prometheus Metrics"]

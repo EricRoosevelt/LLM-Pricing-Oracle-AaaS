@@ -2,6 +2,8 @@
 .env.*
 !.env.example
 !examples/.env.example
+.codex
+.codex/
 venv/
 .venv/
 __pycache__/

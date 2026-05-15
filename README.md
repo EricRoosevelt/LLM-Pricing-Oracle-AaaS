@@ -1,14 +1,14 @@
-# LLM Pricing Oracle AaaS
+# LLM Agent Routing Control Plane
 
 [English](./README.md) | [中文说明](./README_zh.md)
 
-A routing and pricing oracle service designed for AI Agents. It evaluates budget, task scale, latency, concurrency, and capability constraints *prior* to task execution to generate an actionable `routing_cascade`. This empowers Agents to attempt model calls in a prioritized sequence and automatically fall back upon failure.
+An agent-first routing control plane for LLM workloads. It evaluates budget, task shape, latency, concurrency, capability requirements, and probe freshness *before* execution to return a durable routing `decision` plus an ordered fallback ladder that Agents can execute with their own vendor keys.
 
 ## Architecture & Responsibilities
 
-- **Server-Side**: Receives routing requests from Agents, synthesizes pricing configs, real-time health probe data, and scoring engine metrics to output a prioritized model cascade.
-- **Agent-Side**: Consumes the `routing_cascade` and executes the actual model invocation using its own vendor API keys. If the primary model fails, it seamlessly falls back to the next candidate.
-- **Deployment Target**: Consolidate "price comparison, switching, degradation, auditing, and observability" into a standalone AaaS (Agent-as-a-Service) gateway.
+- **Control Plane**: Accepts Agent routing requests, combines catalog metadata, routing policies, and probe signals, then returns a durable `decision_id` with ranked candidates and rejection reasons.
+- **Agent Runtime**: Executes the actual model invocation using its own vendor API keys and reports the outcome back to the control plane.
+- **Deployment Target**: Run as an internal control plane for multiple Agents and workflows without proxying real model traffic.
 
 ## Key Innovations
 
@@ -16,53 +16,54 @@ A routing and pricing oracle service designed for AI Agents. It evaluates budget
 - **Unified Multi-Dimensional Scoring**: Normalizes pricing, QPS, latency, and accuracy into a single dimensional space, supporting dynamic, per-request weight adjustments.
 - **Real-World Load Correction Factors**: Integrates cold start penalties, long-context discounts, concurrency premiums, tiered pricing, and free-tier allowances into the final decision matrix.
 - **Closed-Loop Capability Filtering**: Candidates are pre-filtered based on vision support and task category compatibility, avoiding the "technically capable but practically unusable" trap.
-- **Agent-Friendly Failure Recovery**: The server returns a pre-sorted model cascade. Agents simply iterate through this list on failure, forming a robust and stable disaster recovery pipeline.
+- **Agent-Friendly Failure Recovery**: The control plane returns ranked candidates and a durable `decision_id`; Agents can retry and fall back deterministically, then report what actually happened.
 
 ## Tech Stack
 
-- **FastAPI**: Exposes the routing gateway and health checks.
-- **Pydantic v2**: Defines request/response contracts, scoring weights, and baseline modeling.
-- **SQLAlchemy + Alembic**: Handles audit log persistence and database migrations.
-- **Redis**: Manages rate limiting, caching, and real-time latency/throughput probe data.
-- **HTTPX**: Executes streaming health probes against model vendors and provides Agent-side invocation examples.
-- **Pytest + pytest-cov**: Validates scoring engines and regression scenarios.
+- **FastAPI**: Exposes the Agent-first control plane API.
+- **Pydantic v2**: Defines decision, outcome, catalog, and policy contracts.
+- **SQLAlchemy + Alembic**: Persists control-plane records and schema migrations.
+- **Redis + Redis Streams**: Drives quotas, signal cache, and async event fanout.
+- **HTTPX**: Powers probe-worker checks and the example Agent client.
+- **Pytest + pytest-cov**: Validates decision logic, quotas, and observability primitives.
 
 ## Architectural Highlights & Advantages
 
-### 1. Loose Coupling
-- The gateway outputs decisions; it does not proxy traffic.
-- Agents are free to implement their own retry, fallback, timeout, and vendor SDK logic.
+### 1. Agent-native
+- The control plane only decides and records. It never proxies model traffic.
+- Agents remain free to implement retries, vendor SDK logic, tool execution, and orchestration.
 
-### 2. Highly Extensible
-- New providers can be easily added via `models_config.json`.
-- The scoring engine supports request-level overrides for `score_weights` and `normalization_baseline`.
+### 2. Decision durability
+- Every request produces a durable `decision_id`.
+- Idempotency and outcome reporting let Agents retry safely without duplicating records.
 
-### 3. Observable
-- Every routing request returns `observability` and `benchmark_report` metrics.
-- The audit trail logs candidate cascades, metrics, and request context for comprehensive post-mortem analysis.
+### 3. Control-plane observability
+- Decisions carry ranked candidates, rejections, and policy trace data.
+- Metrics cover decision latency, probe freshness, candidate count, rejection reasons, and outcome success.
 
-### 4. Controllable
-- The default golden weights represent a "cost-first, performance-aware" strategy.
-- Supports multi-layer filtering across budget, latency, capabilities, and capacity constraints.
+### 4. Operable at runtime
+- Probe collection is split into a dedicated worker.
+- Event consumption is split into a separate worker for probe snapshot persistence and future aggregate processing.
 
-## Current Default Golden Weights
+## Default Policies
 
-- `token_cost`: `0.5`
-- `qps`: `0.1`
-- `latency`: `0.2`
-- `accuracy`: `0.2`
+- `balanced`
+- `cheap-first`
+- `latency-first`
+- `reasoning-first`
+- `safe-fallback`
 
-This distribution represents a sweet spot for developers and enterprise scenarios: prioritizing cost-efficiency while maintaining strict performance and quality constraints.
+Each policy is centrally managed by the control plane and selected by `policy_id`.
 
 ## Core Workflow
 
-1. Agent estimates the task character count, budget, context, and latency requirements.
-2. Agent calls `/api/v1/route/optimize`.
-3. Gateway reads `models_config.json` and real-time probe data from Redis.
-4. Scoring engine generates the `routing_cascade`.
-5. Agent attempts actual invocations using the cascade list and its own vendor API keys.
-6. If the primary model fails, the Agent automatically falls back to the next candidate.
-7. Gateway asynchronously persists an audit snapshot for future review.
+1. Agent prepares task shape, budget, context, latency SLO, and capability requirements.
+2. Agent calls `POST /v1/routing/decisions`.
+3. The control plane loads the model catalog, routing policy, and fresh probe signals.
+4. The decision engine returns a durable `decision_id`, ranked candidates, and explicit rejections.
+5. The Agent executes the ranked candidates with its own vendor API keys.
+6. The Agent reports the execution result through `POST /v1/routing/outcomes`.
+7. Probe snapshots and outcome events are available to workers for persistence and future aggregate scoring.
 
 ## Directory Structure
 
@@ -95,19 +96,25 @@ cp .env.example .env
 Key Variables:
 - `REDIS_URL`
 - `DATABASE_URL`
-- `AGENT_API_KEYS`
+- `BOOTSTRAP_AGENT_CREDENTIALS`
 - `KIMI_API_KEY`
 - `DEEPSEEK_API_KEY`
 
 Example:
 ```env
-PROJECT_NAME="LLM Pricing Oracle AaaS"
+PROJECT_NAME="LLM Agent Routing Control Plane"
 REDIS_URL="redis://localhost:6379/0"
 DATABASE_URL="postgresql+asyncpg://oracle_user:oracle_password@localhost:5432/oracle_db"
-AGENT_API_KEYS='{"replace-with-a-long-random-key":"Primary-Agent"}'
+BOOTSTRAP_AGENT_CREDENTIALS='[{"api_key":"replace-with-a-long-random-agent-key","agent_id":"Primary-Agent","environment":"internal","status":"active","scopes":["routing:decide","routing:outcome","control:read"],"rate_limit_rpm":120,"concurrent_limit":25,"daily_budget_usd":250,"default_policy_id":"balanced"}]'
 PROBE_PROXY=""
 KIMI_API_KEY=""
 DEEPSEEK_API_KEY=""
+```
+
+Before committing or pushing, run the repository secret check:
+
+```bash
+bash scripts/secret_scan.sh
 ```
 
 ### 2. Local Development
@@ -129,33 +136,43 @@ docker compose up --build -d
 ### 4. Health Check
 
 ```bash
-curl http://127.0.0.1:8000/health
+curl http://127.0.0.1:8000/v1/control/health/live
 ```
 
 ## API Example
 
-### Fetching the Routing Cascade
+### Creating a Routing Decision
 
 ```bash
-curl -X POST http://127.0.0.1:8000/api/v1/route/optimize \
+curl -X POST http://127.0.0.1:8000/v1/routing/decisions \
   -H 'Content-Type: application/json' \
-  -H 'X-API-Key: replace-with-a-long-random-key' \
+  -H 'X-API-Key: replace-with-a-long-random-agent-key' \
+  -H 'Idempotency-Key: demo-request-001' \
   -d '{
-    "task_category": "general_chat",
+    "agent_id": "Primary-Agent",
+    "workflow_id": "chat-demo",
+    "session_id": "session-001",
+    "request_id": "demo-request-001",
+    "task_type": "general_chat",
+    "modalities": ["text"],
     "language": "zh",
-    "payload_char_count": 2400,
-    "expected_output_words": 300,
-    "max_budget_usd": 0.02,
-    "max_latency_ms": 1500,
-    "requires_vision": false,
-    "current_qps": 1
+    "input_chars": 2400,
+    "expected_output_tokens": 300,
+    "context_window_tokens": 4096,
+    "budget_limit_usd": 0.02,
+    "latency_slo_ms": 1500,
+    "throughput_hint_qps": 1,
+    "policy_id": "balanced",
+    "capability_requirements": {"json_mode": true}
   }'
 ```
 
 The response payload will include:
-- `routing_cascade`
+- `decision_id`
+- `recommended`
+- `candidates`
+- `rejections`
 - `observability`
-- `benchmark_report`
 
 ## Agent Integration
 
@@ -164,9 +181,10 @@ The repository provides a minimal Agent client implementation:
 - `examples/README.md`
 
 It demonstrates:
-- How to initially request the `routing_cascade` from the gateway.
+- How to create a durable routing decision.
 - How to invoke the real model using your own vendor API keys.
-- How to gracefully fall back to the next rank upon timeouts, rate limits, or 5xx errors.
+- How to gracefully fall back to the next ranked candidate.
+- How to report final execution outcomes back to the control plane.
 
 ## Testing
 
@@ -179,6 +197,9 @@ Or run explicitly with development dependencies:
 pip install -r requirements-dev.txt
 pytest -q
 ```
+
+Manual validation runbook:
+- [docs/manual-test-runbook.md](./docs/manual-test-runbook.md)
 
 ## CI/CD
 
@@ -196,6 +217,6 @@ Currently, dependencies are automatically installed and tests are executed on `p
 
 ## Known Limitations
 
-- The `accuracy` metric currently relies on static configurations and caller overrides; a real-world outcome feedback loop is not yet integrated.
-- Auditing is primarily utilized for post-mortem review and observability. It does not yet form an automated re-training or weight-adjustment loop.
+- Outcome reports are persisted and observable, but they are not yet used for automated accuracy calibration, retraining, or weight adjustment.
+- Auditing is primarily utilized for post-mortem review and observability. It does not yet form an automated optimization loop.
 - The default database and Redis configurations in this repository are geared towards local development. Production environments should transition to managed services with isolated credentials.

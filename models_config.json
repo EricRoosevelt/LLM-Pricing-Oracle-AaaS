@@ -1,54 +1,92 @@
 {
+  "catalog_version": "2026-04-23-v1",
   "scoring_defaults": {
-    "weights": {
-      "token_cost": 0.5,
-      "qps": 0.1,
-      "latency": 0.2,
-      "accuracy": 0.2
-    },
     "normalization_baseline": {
       "token_cost_usd_per_1k": 0.002,
       "qps": 40.0,
       "latency_ms": 800.0,
       "accuracy": 0.8
-    },
-    "burst_qps_threshold": 0.85,
-    "long_text_threshold_tokens": 16000
+    }
   },
   "providers": {
     "deepseek": {
+      "display_name": "DeepSeek",
       "base_url": "https://api.deepseek.com/chat/completions",
       "env_key_name": "DEEPSEEK_API_KEY",
       "models": {
         "deepseek-chat": {
+          "display_name": "DeepSeek Chat",
           "in_price_1k": 0.00014,
           "out_price_1k": 0.00028,
-          "supports_vision": false,
-          "supported_task_categories": ["code_generation", "summarization", "general_chat"]
+          "qps": 95.0,
+          "ttfb_ms": 320,
+          "accuracy": 0.82,
+          "context_window_tokens": 64000,
+          "capabilities": {
+            "vision": false,
+            "reasoning": false,
+            "tool_calling": true,
+            "json_mode": true,
+            "supported_task_types": ["general_chat", "code_generation", "summarization", "tool_execution"]
+          }
         },
         "deepseek-reasoner": {
+          "display_name": "DeepSeek Reasoner",
           "in_price_1k": 0.00055,
           "out_price_1k": 0.00219,
-          "supports_vision": false,
-          "supported_task_categories": ["code_generation", "summarization", "general_chat"]
+          "qps": 55.0,
+          "ttfb_ms": 800,
+          "accuracy": 0.9,
+          "context_window_tokens": 64000,
+          "cold_start_ms": 150,
+          "capabilities": {
+            "vision": false,
+            "reasoning": true,
+            "tool_calling": false,
+            "json_mode": true,
+            "supported_task_types": ["general_chat", "code_generation", "summarization", "reasoning"]
+          }
         }
       }
     },
     "moonshot": {
+      "display_name": "Moonshot",
       "base_url": "https://api.moonshot.cn/v1/chat/completions",
       "env_key_name": "KIMI_API_KEY",
       "models": {
         "moonshot-v1-8k": {
+          "display_name": "Moonshot v1 8k",
           "in_price_1k": 0.0016,
           "out_price_1k": 0.0016,
-          "supports_vision": false,
-          "supported_task_categories": ["code_generation", "summarization", "general_chat"]
+          "qps": 45.0,
+          "ttfb_ms": 420,
+          "accuracy": 0.8,
+          "context_window_tokens": 8192,
+          "capabilities": {
+            "vision": false,
+            "reasoning": false,
+            "tool_calling": false,
+            "json_mode": true,
+            "supported_task_types": ["general_chat", "summarization"]
+          }
         },
         "moonshot-v1-32k": {
+          "display_name": "Moonshot v1 32k",
           "in_price_1k": 0.0033,
           "out_price_1k": 0.0033,
-          "supports_vision": false,
-          "supported_task_categories": ["code_generation", "summarization", "general_chat"]
+          "qps": 35.0,
+          "ttfb_ms": 540,
+          "accuracy": 0.83,
+          "context_window_tokens": 32768,
+          "long_text_discount_rate": 0.08,
+          "long_text_threshold_tokens": 16000,
+          "capabilities": {
+            "vision": false,
+            "reasoning": false,
+            "tool_calling": false,
+            "json_mode": true,
+            "supported_task_types": ["general_chat", "summarization", "code_generation"]
+          }
         }
       }
     }

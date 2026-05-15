@@ -1,21 +1,28 @@
-# app/services/pricing_engine.py
-import json
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
-from pathlib import Path
 from time import perf_counter
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Mapping, Optional
 
-from app.schemas.routing import RouteDecision, RoutingBenchmarkReport, RoutingObservability
+from app.schemas.routing import (
+    CatalogModel,
+    CatalogSnapshot,
+    DecisionCandidate,
+    DecisionObservability,
+    DecisionRejection,
+    RoutingDecisionRequest,
+    RoutingDecisionResponse,
+    RoutingPolicy,
+    ScoreBreakdown,
+)
 from app.services.token_estimator import estimate_tokens
 
-CONFIG_PATH = Path(__file__).parent.parent.parent / "models_config.json"
 
-with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-    GLOBAL_MODEL_CONFIG = json.load(f)
-
-DEFAULT_BASELINE = {"token_cost_usd_per_1k": 0.002, "qps": 40.0, "latency_ms": 800.0, "accuracy": 0.8}
-DEFAULT_WEIGHTS = {"token_cost": 0.5, "qps": 0.1, "latency": 0.2, "accuracy": 0.2}
-DEFAULT_SCORING = GLOBAL_MODEL_CONFIG.get("scoring_defaults", {})
+DEFAULT_BASELINE = {
+    "token_cost_usd_per_1k": 0.002,
+    "qps": 40.0,
+    "latency_ms": 800.0,
+    "accuracy": 0.8,
+}
 ZERO = Decimal("0")
 THOUSAND = Decimal("1000")
 
@@ -44,132 +51,279 @@ def _round_money(value: Decimal) -> float:
     return float(value.quantize(Decimal("0.000001"), rounding=ROUND_HALF_UP))
 
 
-def _pick_tier(model: Dict[str, Any], total_tokens: int) -> Dict[str, Any]:
-    for tier in model.get("pricing_tiers", []):
-        limit = tier.get("upto_tokens")
-        if limit is None or total_tokens <= limit:
-            return tier
-    return {}
+def _normalize_weights(policy: RoutingPolicy) -> Dict[str, float]:
+    weights = policy.weights.model_dump()
+    total = sum(max(0.0, float(value)) for value in weights.values()) or 1.0
+    return {key: max(0.0, float(value)) / total for key, value in weights.items()}
 
 
-def _supports_request(model: Dict[str, Any], task_category: str, requires_vision: bool) -> bool:
-    if requires_vision and not model.get("supports_vision", False):
-        return False
-    supported_task_categories = model.get("supported_task_categories")
-    if supported_task_categories and task_category not in supported_task_categories:
-        return False
-    return True
+def _pick_tier(model: CatalogModel, total_tokens: int) -> Dict[str, float]:
+    for tier in model.pricing_tiers:
+        if tier.upto_tokens is None or total_tokens <= tier.upto_tokens:
+            return tier.model_dump()
+    return {"in_price_1k": model.in_price_1k, "out_price_1k": model.out_price_1k}
 
 
-ACTIVE_MODELS = []
-for provider_name, provider_info in GLOBAL_MODEL_CONFIG.get("providers", {}).items():
-    for model_name, model_info in provider_info.get("models", {}).items():
-        ACTIVE_MODELS.append(
-            {
-                "model_id": f"{provider_name}/{model_name}",
-                "ttfb_ms": model_info.get("ttfb_ms", 1000),
-                "qps": model_info.get("qps", 20.0),
-                "accuracy": model_info.get("accuracy", 0.72),
-                **model_info,
-            }
+def _signal_age_seconds(signal: Mapping[str, Any] | None) -> Optional[int]:
+    if not signal or not signal.get("last_probe_at"):
+        return None
+    raw = signal["last_probe_at"]
+    try:
+        observed_at = datetime.fromisoformat(raw.replace("Z", "+00:00")) if isinstance(raw, str) else raw
+        if observed_at.tzinfo is None:
+            observed_at = observed_at.replace(tzinfo=timezone.utc)
+        return max(0, int((datetime.now(timezone.utc) - observed_at).total_seconds()))
+    except (TypeError, ValueError):
+        return None
+
+
+def _matches_capabilities(model: CatalogModel, request: RoutingDecisionRequest) -> Optional[str]:
+    capabilities = model.capabilities
+    required = request.capability_requirements
+    if required.vision and not capabilities.vision:
+        return "vision"
+    if required.reasoning and not capabilities.reasoning:
+        return "reasoning"
+    if required.tool_calling and not capabilities.tool_calling:
+        return "tool_calling"
+    if required.json_mode and not capabilities.json_mode:
+        return "json_mode"
+    if request.task_type not in capabilities.supported_task_types:
+        return "task_type"
+    if request.context_window_tokens > model.context_window_tokens:
+        return "context_window"
+    return None
+
+
+def calculate_routing_decision(
+    request: RoutingDecisionRequest,
+    catalog: CatalogSnapshot,
+    policy: RoutingPolicy,
+    signals: Mapping[str, Mapping[str, Any]],
+    signal_freshness_seconds: int,
+    ttl_seconds: int,
+) -> RoutingDecisionResponse:
+    started = perf_counter()
+    baseline = {**DEFAULT_BASELINE, **catalog.normalization_baseline}
+    weights = _normalize_weights(policy)
+    candidates: list[DecisionCandidate] = []
+    rejections: list[DecisionRejection] = []
+    filtered_by_budget = 0
+    filtered_by_latency = 0
+    filtered_by_capacity = 0
+    filtered_by_capability = 0
+    filtered_by_provider = 0
+    freshness_values: list[int] = []
+    policy_trace = [
+        f"catalog={catalog.version} checksum={catalog.checksum[:12]}",
+        f"policy={policy.policy_id}@{policy.version}",
+    ]
+
+    for model in catalog.models:
+        if request.provider_allowlist and model.provider not in request.provider_allowlist:
+            filtered_by_provider += 1
+            rejections.append(
+                DecisionRejection(
+                    model_id=model.model_id,
+                    provider=model.provider,
+                    reason="provider_filtered",
+                    detail=f"provider '{model.provider}' not present in allowlist",
+                )
+            )
+            continue
+        if request.provider_denylist and model.provider in request.provider_denylist:
+            filtered_by_provider += 1
+            rejections.append(
+                DecisionRejection(
+                    model_id=model.model_id,
+                    provider=model.provider,
+                    reason="provider_filtered",
+                    detail=f"provider '{model.provider}' explicitly denied",
+                )
+            )
+            continue
+
+        capability_gap = _matches_capabilities(model, request)
+        if capability_gap:
+            filtered_by_capability += 1
+            rejections.append(
+                DecisionRejection(
+                    model_id=model.model_id,
+                    provider=model.provider,
+                    reason="capability_filtered",
+                    detail=f"missing or incompatible capability: {capability_gap}",
+                )
+            )
+            continue
+
+        signal = signals.get(model.model_id, {})
+        age_seconds = _signal_age_seconds(signal)
+        freshness_values.append(age_seconds if age_seconds is not None else signal_freshness_seconds * 2)
+        degraded_reason = signal.get("degraded_reason")
+        ttfb_ms = int(signal.get("ttfb_p50_ms", model.default_ttfb_ms))
+        qps = float(signal.get("throughput_hint_qps", model.throughput_hint_qps))
+        success_rate = float(signal.get("success_rate", 1.0))
+
+        throughput_hint = request.throughput_hint_qps or 0.0
+        if throughput_hint > 0 and qps > 0 and throughput_hint > qps * model.hard_capacity_factor:
+            filtered_by_capacity += 1
+            rejections.append(
+                DecisionRejection(
+                    model_id=model.model_id,
+                    provider=model.provider,
+                    reason="capacity_filtered",
+                    detail=f"throughput_hint_qps={throughput_hint} exceeds effective capacity {round(qps * model.hard_capacity_factor, 2)}",
+                )
+            )
+            continue
+
+        input_tokens = estimate_tokens(request.input_chars, model.model_id, request.language)
+        output_tokens = max(1, request.expected_output_tokens)
+        total_tokens = max(1, input_tokens + output_tokens)
+        tier = _pick_tier(model, total_tokens)
+        base_cost = (Decimal(input_tokens) / THOUSAND) * _to_decimal(tier["in_price_1k"])
+        base_cost += (Decimal(output_tokens) / THOUSAND) * _to_decimal(tier["out_price_1k"])
+
+        if throughput_hint <= 0:
+            ttfb_ms += model.cold_start_ms
+            base_cost += _to_decimal(model.cold_start_cost_usd)
+
+        if total_tokens >= model.long_text_threshold_tokens and model.long_text_discount_rate > 0:
+            base_cost -= base_cost * _to_decimal(model.long_text_discount_rate)
+
+        if throughput_hint > 0 and qps > 0 and throughput_hint / qps > model.burst_qps_threshold:
+            overage = min((throughput_hint / qps) - model.burst_qps_threshold, 1.0)
+            base_cost += base_cost * _to_decimal(model.concurrency_premium_rate * overage)
+
+        total_cost = max(ZERO, base_cost)
+        if request.budget_limit_usd == 0 and total_cost > ZERO:
+            filtered_by_budget += 1
+            rejections.append(
+                DecisionRejection(
+                    model_id=model.model_id,
+                    provider=model.provider,
+                    reason="budget_filtered",
+                    detail="request requires a zero-cost route but model is billable",
+                )
+            )
+            continue
+        if request.budget_limit_usd > 0 and float(total_cost) > request.budget_limit_usd:
+            filtered_by_budget += 1
+            rejections.append(
+                DecisionRejection(
+                    model_id=model.model_id,
+                    provider=model.provider,
+                    reason="budget_filtered",
+                    detail=f"estimated cost {round(float(total_cost), 6)} exceeds budget_limit_usd={request.budget_limit_usd}",
+                )
+            )
+            continue
+        if request.latency_slo_ms and ttfb_ms > request.latency_slo_ms:
+            filtered_by_latency += 1
+            rejections.append(
+                DecisionRejection(
+                    model_id=model.model_id,
+                    provider=model.provider,
+                    reason="latency_filtered",
+                    detail=f"expected_ttfb_ms={ttfb_ms} exceeds latency_slo_ms={request.latency_slo_ms}",
+                )
+            )
+            continue
+
+        unit_cost = ZERO if total_cost == ZERO else total_cost * THOUSAND / Decimal(total_tokens)
+        freshness_penalty = 0.0
+        if age_seconds is None:
+            freshness_penalty = round(policy.freshness_penalty, 4)
+        elif age_seconds > signal_freshness_seconds:
+            freshness_penalty = round(
+                min(1.0, age_seconds / max(signal_freshness_seconds, 1)) * policy.freshness_penalty,
+                4,
+            )
+        degraded_penalty = round(policy.degraded_penalty if degraded_reason else 0.0, 4)
+        fallback_bonus = round(policy.fallback_bonus * success_rate, 4)
+
+        score_breakdown = ScoreBreakdown(
+            token_cost=round(_cost_score(float(unit_cost), baseline["token_cost_usd_per_1k"]), 4),
+            qps=round(_benefit_score(qps, baseline["qps"]), 4),
+            latency=round(_cost_score(float(ttfb_ms), baseline["latency_ms"]), 4),
+            accuracy=round(_benefit_score(model.accuracy * success_rate, baseline["accuracy"]), 4),
+            freshness_penalty=freshness_penalty,
+            degraded_penalty=degraded_penalty,
+            fallback_bonus=fallback_bonus,
+        )
+        confidence_score = round(
+            _clamp(
+                sum(getattr(score_breakdown, key) * weights[key] for key in weights)
+                - freshness_penalty
+                - degraded_penalty
+                + fallback_bonus
+            ),
+            4,
+        )
+        candidates.append(
+            DecisionCandidate(
+                rank=len(candidates) + 1,
+                model_id=model.model_id,
+                provider=model.provider,
+                estimated_cost_usd=_round_money(total_cost),
+                expected_ttfb_ms=ttfb_ms,
+                confidence_score=confidence_score,
+                signal_freshness_seconds=age_seconds,
+                degraded_reason=degraded_reason,
+                score_breakdown=score_breakdown,
+            )
         )
 
-def calculate_optimal_routing(
-    input_char_count: int,
-    output_word_count: int,
-    max_budget_usd: float,
-    max_latency_ms: Optional[int] = None,
-    language: str = "en",
-    task_category: str = "general_chat",
-    requires_vision: bool = False,
-    real_latencies_map: Optional[Dict[str, int]] = None,
-    real_qps_map: Optional[Dict[str, float]] = None,
-    score_weights: Optional[Dict[str, float]] = None,
-    normalization_baseline: Optional[Dict[str, float]] = None,
-    current_qps: Optional[float] = None,
-    free_tier_remaining_tokens: Optional[Dict[str, int]] = None,
-    accuracy_overrides: Optional[Dict[str, float]] = None,
-    return_report: bool = False,
-):
-    started = perf_counter()
-    candidates: List[RouteDecision] = []
-    real_latencies_map = real_latencies_map or {}
-    real_qps_map = real_qps_map or {}
-    free_tier_remaining_tokens = free_tier_remaining_tokens or {}
-    accuracy_overrides = accuracy_overrides or {}
-    weights = {k: float(v) for k, v in {**DEFAULT_WEIGHTS, **DEFAULT_SCORING.get("weights", {}), **(score_weights or {})}.items()}
-    total_weight = sum(max(0.0, value) for value in weights.values()) or 1.0
-    weights = {k: max(0.0, value) / total_weight for k, value in weights.items()}
-    baseline = {k: float(v) for k, v in {**DEFAULT_BASELINE, **DEFAULT_SCORING.get("normalization_baseline", {}), **(normalization_baseline or {})}.items()}
-    output_char_approx = output_word_count * 5
-    budget_filtered = 0
-    latency_filtered = 0
-    capacity_filtered = 0
-    capability_filtered = 0
-    max_pricing_error = 0.0
+    candidates.sort(key=lambda item: (-item.confidence_score, item.estimated_cost_usd, item.expected_ttfb_ms))
+    candidates = candidates[: policy.max_candidates]
+    for index, candidate in enumerate(candidates, start=1):
+        candidate.rank = index
 
-    for model in ACTIVE_MODELS:
-        model_id = model["model_id"]
-        if not _supports_request(model, task_category, requires_vision):
-            capability_filtered += 1
-            continue
-        in_tokens = estimate_tokens(input_char_count, model_id, language)
-        out_tokens = estimate_tokens(output_char_approx, model_id, language)
-        total_tokens = max(1, in_tokens + out_tokens)
-        tier = _pick_tier(model, total_tokens)
-        remaining = max(0, int(free_tier_remaining_tokens.get(model_id, 0)))
-        free_in = min(remaining, in_tokens)
-        remaining -= free_in
-        free_out = min(remaining, out_tokens)
-        billable_in = in_tokens - free_in
-        billable_out = out_tokens - free_out
-        in_price = _to_decimal(tier.get("in_price_1k", model["in_price_1k"]))
-        out_price = _to_decimal(tier.get("out_price_1k", model["out_price_1k"]))
-        base_cost = (Decimal(billable_in) / THOUSAND) * in_price + (Decimal(billable_out) / THOUSAND) * out_price
-        latency_ms = int(real_latencies_map.get(model_id, model.get("ttfb_ms", baseline["latency_ms"])))
-        cold_start_cost = ZERO
-        if current_qps is None or current_qps <= 0:
-            latency_ms += int(model.get("cold_start_ms", 0))
-            cold_start_cost = _to_decimal(model.get("cold_start_cost_usd", 0))
-        qps = float(real_qps_map.get(model_id, model.get("qps", baseline["qps"])))
-        utilization = (float(current_qps) / qps) if current_qps and qps > 0 else 0.0
-        if qps > 0 and utilization > float(model.get("hard_capacity_factor", 1.15)):
-            capacity_filtered += 1
-            continue
-        premium = ZERO
-        threshold = float(model.get("burst_qps_threshold", DEFAULT_SCORING.get("burst_qps_threshold", 0.85)))
-        rate = float(model.get("concurrency_premium_rate", 0))
-        if qps > 0 and utilization > threshold and rate > 0:
-            premium = base_cost * _to_decimal(rate * min((utilization - threshold) / max(0.01, 1.0 - threshold), 1.5))
-        discount = ZERO
-        discount_rate = float(model.get("long_text_discount_rate", 0))
-        token_threshold = int(model.get("long_text_threshold_tokens", DEFAULT_SCORING.get("long_text_threshold_tokens", 16000)))
-        if total_tokens >= token_threshold and discount_rate > 0:
-            discount = base_cost * _to_decimal(discount_rate)
-        total_cost = max(ZERO, base_cost + cold_start_cost + premium - discount)
-        if (max_budget_usd == 0 and total_cost > ZERO) or (max_budget_usd > 0 and float(total_cost) > max_budget_usd):
-            budget_filtered += 1
-            continue
-        if max_latency_ms and latency_ms > max_latency_ms:
-            latency_filtered += 1
-            continue
-        unit_cost = ZERO if total_cost == ZERO else total_cost * THOUSAND / Decimal(total_tokens)
-        accuracy = float(accuracy_overrides.get(model_id, model.get("accuracy", baseline["accuracy"])))
-        score_breakdown = {
-            "token_cost": round(_cost_score(float(unit_cost), baseline["token_cost_usd_per_1k"]), 4),
-            "qps": round(_benefit_score(qps, baseline["qps"]), 4),
-            "latency": round(_cost_score(float(latency_ms), baseline["latency_ms"]), 4),
-            "accuracy": round(_benefit_score(accuracy, baseline["accuracy"]), 4),
-        }
-        normalized_score = round(sum(score_breakdown[key] * weights[key] for key in weights), 4)
-        rounded_cost = _round_money(total_cost)
-        if total_cost > ZERO:
-            max_pricing_error = max(max_pricing_error, abs(rounded_cost - float(total_cost)) / float(total_cost) * 100)
-        candidates.append(RouteDecision(model_id=model_id, estimated_cost_usd=rounded_cost, expected_ttfb_ms=latency_ms, confidence_score=normalized_score, normalized_score=normalized_score, score_breakdown=score_breakdown, pricing_components={"base_cost_usd": _round_money(base_cost), "cold_start_cost_usd": _round_money(cold_start_cost), "long_text_discount_usd": _round_money(discount), "concurrency_premium_usd": _round_money(premium), "unit_cost_usd_per_1k": _round_money(unit_cost), "free_tier_tokens_used": float(free_in + free_out)}))
+    fallback_safety_score = 0.0
+    if candidates:
+        fallback_safety_score = round(
+            _clamp(sum(candidate.confidence_score for candidate in candidates) / len(candidates)),
+            4,
+        )
+        policy_trace.append(f"top_candidate={candidates[0].model_id}")
+        policy_trace.append(f"fallback_depth={len(candidates) - 1}")
+    policy_trace.append(f"rejections={len(rejections)}")
+    policy_trace.append(f"freshness_budget_seconds={signal_freshness_seconds}")
 
-    candidates.sort(key=lambda item: (-item.normalized_score, item.estimated_cost_usd, item.expected_ttfb_ms))
     compute_ms = round((perf_counter() - started) * 1000, 3)
-    score_margin = round(candidates[0].normalized_score - candidates[1].normalized_score, 4) if len(candidates) > 1 else (candidates[0].normalized_score if candidates else 0.0)
-    observability = RoutingObservability(routing_compute_ms=compute_ms, pricing_error_pct=round(max_pricing_error, 4), evaluated_models=len(ACTIVE_MODELS), filtered_by_budget=budget_filtered, filtered_by_latency=latency_filtered, filtered_by_capacity=capacity_filtered, filtered_by_capability=capability_filtered, applied_weights={k: round(v, 4) for k, v in weights.items()}, normalization_baseline={k: round(v, 4) for k, v in baseline.items()}, score_margin=score_margin)
-    report = {"cascade": candidates, "observability": observability, "benchmark_report": RoutingBenchmarkReport(switch_latency_target_ms=200, switch_latency_actual_ms=compute_ms, switch_latency_met=compute_ms < 200, pricing_error_target_pct=3.0, pricing_error_actual_pct=round(max_pricing_error, 4), pricing_accuracy_met=max_pricing_error < 3.0)}
-    return report if return_report else candidates
+    observability = DecisionObservability(
+        decision_compute_ms=compute_ms,
+        evaluated_models=len(catalog.models),
+        candidate_count=len(candidates),
+        filtered_by_budget=filtered_by_budget,
+        filtered_by_latency=filtered_by_latency,
+        filtered_by_capacity=filtered_by_capacity,
+        filtered_by_capability=filtered_by_capability,
+        filtered_by_provider=filtered_by_provider,
+        signal_freshness_min_seconds=min(freshness_values) if freshness_values else None,
+        fallback_safety_score=fallback_safety_score,
+        policy_trace=policy_trace,
+    )
+
+    if not candidates:
+        raise ValueError("No models survived policy, budget, latency, and capability filtering.")
+
+    top_candidate = candidates[0]
+    decision_explanation = (
+        f"Selected {top_candidate.model_id} for policy '{policy.policy_id}' because it offered the best "
+        f"confidence/cost/latency balance for task_type='{request.task_type}' with "
+        f"{len(candidates)} viable candidates after filtering."
+    )
+    expires_at = datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds)
+    return RoutingDecisionResponse(
+        decision_id="",
+        catalog_version=catalog.version,
+        policy_id=policy.policy_id,
+        policy_version=policy.version,
+        expires_at=expires_at,
+        recommended=top_candidate,
+        candidates=candidates,
+        rejections=rejections,
+        decision_explanation=decision_explanation,
+        observability=observability,
+    )

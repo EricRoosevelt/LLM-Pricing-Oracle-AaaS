@@ -1,5 +1,4 @@
 services:
-  # 核心账本数据库
   postgres:
     image: postgres:15-alpine
     container_name: oracle_postgres
@@ -13,7 +12,6 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
 
-  # 高频节流与缓存层
   redis:
     image: redis:7-alpine
     container_name: oracle_redis
@@ -23,26 +21,51 @@ services:
     volumes:
       - redis_data:/data
 
-  # 👇 新增我们自己的 API 服务 👇
-  api:
-    build: .  # 告诉 Docker 用当前目录的 Dockerfile 构建镜像
-    container_name: oracle_api
+  decision-api:
+    build: .
+    container_name: oracle_decision_api
     ports:
       - "8000:8000"
     depends_on:
       - postgres
       - redis
     environment:
-      # 核心：在这里覆盖 .env，把 127.0.0.1 换成容器的内部 DNS 名字
-      # 例如：postgres 是数据库容器的 DNS 名字，redis 是缓存容器的 DNS 名字
-      # docker-compose.yml 里 environment 节点下写的变量，会直接无视并强制覆盖 .env 文件里的同名变量
       - DATABASE_URL=postgresql+asyncpg://oracle_user:oracle_password@postgres:5432/oracle_db
       - REDIS_URL=redis://redis:6379/0
-      - AGENT_API_KEYS=${AGENT_API_KEYS}
+      - CATALOG_PATH=/app/models_config.json
+      - BOOTSTRAP_AGENT_CREDENTIALS=${BOOTSTRAP_AGENT_CREDENTIALS}
       - PROBE_PROXY=${PROBE_PROXY:-}
       - KIMI_API_KEY=${KIMI_API_KEY:-}
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
-      # 如果上面你的 postgres 密码不一样，请按实际修改
+    command: ["sh", "-c", "alembic upgrade head && uvicorn app.main:app --host 0.0.0.0 --port 8000"]
+    restart: always
+
+  probe-worker:
+    build: .
+    container_name: oracle_probe_worker
+    depends_on:
+      - redis
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql+asyncpg://oracle_user:oracle_password@postgres:5432/oracle_db
+      - CATALOG_PATH=/app/models_config.json
+      - PROBE_PROXY=${PROBE_PROXY:-}
+      - KIMI_API_KEY=${KIMI_API_KEY:-}
+      - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY:-}
+    command: ["python", "-m", "app.workers.probe_worker"]
+    restart: always
+
+  event-consumer:
+    build: .
+    container_name: oracle_event_consumer
+    depends_on:
+      - postgres
+      - redis
+    environment:
+      - REDIS_URL=redis://redis:6379/0
+      - DATABASE_URL=postgresql+asyncpg://oracle_user:oracle_password@postgres:5432/oracle_db
+      - CATALOG_PATH=/app/models_config.json
+    command: ["sh", "-c", "alembic upgrade head && python -m app.workers.event_consumer"]
     restart: always
 
 volumes:

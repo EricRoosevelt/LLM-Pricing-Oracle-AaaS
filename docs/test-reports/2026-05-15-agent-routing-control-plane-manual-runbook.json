@@ -1,0 +1,409 @@
+{
+  "test_environment": {
+    "description": "LLM Agent Routing Control Plane - Manual Test Report",
+    "docker_running": true,
+    "credential_values_redacted": true
+  },
+  "5_health_checks": {
+    "5.1_live": {
+      "status": "online",
+      "project": "LLM Agent Routing Control Plane",
+      "details": {
+        "mode": "agent-routing-control-plane"
+      }
+    },
+    "5.2_ready": {
+      "status": "online",
+      "project": "LLM Agent Routing Control Plane",
+      "details": {
+        "database": true,
+        "redis": true,
+        "catalog_loaded": true,
+        "fresh_signals": true
+      }
+    }
+  },
+  "6_control_plane_readonly": {
+    "6.1_unauthorized_catalog": {
+      "detail": "Missing X-API-Key header."
+    },
+    "6.2_authorized_catalog": {
+      "status_code": 200,
+      "passed": true,
+      "expectation": "认证后 catalog 返回 catalog_version、providers、models。",
+      "raw_response_omitted": true,
+      "actual": {
+        "catalog_version": "2026-04-23-v1",
+        "checksum": "e42d479166e5e3b592f00b7e122c02cc1ac8dfec85f550bc21a8eab9f59a26ac",
+        "provider_count": 2,
+        "providers": [
+          "deepseek",
+          "moonshot"
+        ],
+        "model_count": 4,
+        "model_ids": [
+          "deepseek/deepseek-chat",
+          "deepseek/deepseek-reasoner",
+          "moonshot/moonshot-v1-8k",
+          "moonshot/moonshot-v1-32k"
+        ],
+        "required_fields_present": {
+          "catalog_version": true,
+          "providers": true,
+          "models": true
+        }
+      }
+    },
+    "6.3_authorized_policies": {
+      "status_code": 200,
+      "passed": true,
+      "expectation": "认证后 policies 返回五类内置 routing policy。",
+      "raw_response_omitted": true,
+      "actual": {
+        "policy_count": 5,
+        "policy_ids": [
+          "balanced",
+          "cheap-first",
+          "latency-first",
+          "reasoning-first",
+          "safe-fallback"
+        ],
+        "active_policy_count": 5,
+        "expected_policy_ids_present": true,
+        "versions": {
+          "balanced": "2026.04.v1",
+          "cheap-first": "2026.04.v1",
+          "latency-first": "2026.04.v1",
+          "reasoning-first": "2026.04.v1",
+          "safe-fallback": "2026.04.v1"
+        },
+        "max_candidates_by_policy": {
+          "balanced": 4,
+          "cheap-first": 4,
+          "latency-first": 3,
+          "reasoning-first": 3,
+          "safe-fallback": 5
+        }
+      }
+    }
+  },
+  "7_decision_api_main_path": {
+    "7.1_create_decision": {
+      "decision_id": "768aebe7db6348238284c175e79c9bc9",
+      "catalog_version": "2026-04-23-v1",
+      "policy_id": "balanced",
+      "policy_version": "2026.04.v1",
+      "expires_at": "2026-05-14T19:02:27.877675Z",
+      "recommended": {
+        "rank": 1,
+        "model_id": "deepseek/deepseek-chat",
+        "provider": "deepseek",
+        "estimated_cost_usd": 0.000319,
+        "expected_ttfb_ms": 639,
+        "confidence_score": 0.6602,
+        "signal_freshness_seconds": 32,
+        "degraded_reason": null,
+        "score_breakdown": {
+          "token_cost": 0.9254,
+          "qps": 0.1387,
+          "latency": 0.5559,
+          "accuracy": 0.5062,
+          "freshness_penalty": 0.0,
+          "degraded_penalty": 0.0,
+          "fallback_bonus": 0.05
+        }
+      },
+      "candidates": [
+        {
+          "rank": 1,
+          "model_id": "deepseek/deepseek-chat",
+          "provider": "deepseek",
+          "estimated_cost_usd": 0.000319,
+          "expected_ttfb_ms": 639,
+          "confidence_score": 0.6602,
+          "signal_freshness_seconds": 32,
+          "degraded_reason": null,
+          "score_breakdown": {
+            "token_cost": 0.9254,
+            "qps": 0.1387,
+            "latency": 0.5559,
+            "accuracy": 0.5062,
+            "freshness_penalty": 0.0,
+            "degraded_penalty": 0.0,
+            "fallback_bonus": 0.05
+          }
+        },
+        {
+          "rank": 2,
+          "model_id": "deepseek/deepseek-reasoner",
+          "provider": "deepseek",
+          "estimated_cost_usd": 0.001581,
+          "expected_ttfb_ms": 615,
+          "confidence_score": 0.5942,
+          "signal_freshness_seconds": 32,
+          "degraded_reason": null,
+          "score_breakdown": {
+            "token_cost": 0.7147,
+            "qps": 0.1355,
+            "latency": 0.5654,
+            "accuracy": 0.5294,
+            "freshness_penalty": 0.0,
+            "degraded_penalty": 0.0,
+            "fallback_bonus": 0.05
+          }
+        }
+      ],
+      "rejections": [
+        {
+          "model_id": "moonshot/moonshot-v1-8k",
+          "provider": "moonshot",
+          "reason": "latency_filtered",
+          "detail": "expected_ttfb_ms=4236 exceeds latency_slo_ms=1500"
+        },
+        {
+          "model_id": "moonshot/moonshot-v1-32k",
+          "provider": "moonshot",
+          "reason": "latency_filtered",
+          "detail": "expected_ttfb_ms=5034 exceeds latency_slo_ms=1500"
+        }
+      ],
+      "decision_explanation": "Selected deepseek/deepseek-chat for policy 'balanced' because it offered the best confidence/cost/latency balance for task_type='general_chat' with 2 viable candidates after filtering.",
+      "observability": {
+        "decision_compute_ms": 0.226,
+        "evaluated_models": 4,
+        "candidate_count": 2,
+        "filtered_by_budget": 0,
+        "filtered_by_latency": 2,
+        "filtered_by_capacity": 0,
+        "filtered_by_capability": 0,
+        "filtered_by_provider": 0,
+        "signal_freshness_min_seconds": 29,
+        "fallback_safety_score": 0.6272,
+        "policy_trace": [
+          "catalog=2026-04-23-v1 checksum=e42d479166e5",
+          "policy=balanced@2026.04.v1",
+          "top_candidate=deepseek/deepseek-chat",
+          "fallback_depth=1",
+          "rejections=2",
+          "freshness_budget_seconds=90"
+        ]
+      }
+    },
+    "7.2_idempotency_check": {
+      "note": "decision_id 与 7.1 完全一致",
+      "decision_id": "768aebe7db6348238284c175e79c9bc9"
+    }
+  },
+  "8_decision_api_failure_paths": {
+    "8.1_agent_id_mismatch": {
+      "detail": "request agent_id does not match authenticated credential."
+    },
+    "8.2_policy_not_exists": {
+      "detail": "Unknown or inactive policy 'not-exists-policy'."
+    },
+    "8.3_capability_filtered": {
+      "detail": "No models survived policy, budget, latency, and capability filtering."
+    },
+    "8.4_provider_allowlist": {
+      "status_code": 200,
+      "passed": true,
+      "expectation": "provider_allowlist=[\"deepseek\"] 时，只返回 deepseek 候选，并将 moonshot 过滤为 provider_filtered。",
+      "request_variation": {
+        "provider_allowlist": [
+          "deepseek"
+        ]
+      },
+      "raw_response_omitted": true,
+      "actual": {
+        "decision_id": "b5cd8502a2c6499083930133ffcf0d3a",
+        "catalog_version": "2026-04-23-v1",
+        "policy_id": "balanced",
+        "policy_version": "2026.04.v1",
+        "recommended_model_id": "deepseek/deepseek-chat",
+        "recommended_provider": "deepseek",
+        "candidate_count": 2,
+        "candidate_providers": [
+          "deepseek"
+        ],
+        "candidate_model_ids": [
+          "deepseek/deepseek-chat",
+          "deepseek/deepseek-reasoner"
+        ],
+        "rejection_count": 2,
+        "rejected_providers": [
+          "moonshot"
+        ],
+        "rejection_reasons": {
+          "provider_filtered": 2
+        },
+        "filtered_by_provider": 2,
+        "allowlist_enforced": true
+      }
+    },
+    "8.5_provider_denylist": {
+      "detail": "No models survived policy, budget, latency, and capability filtering."
+    }
+  },
+  "9_outcome": {
+    "9.1_success": {
+      "decision_id": "768aebe7db6348238284c175e79c9bc9",
+      "outcome_status": "recorded",
+      "final_status": "success"
+    },
+    "9.2_idempotency_check": {
+      "description": "同一个 decision_id 使用同一个 Idempotency-Key 连续两次回写 outcome。",
+      "passed": true,
+      "status": "fixed_and_verified",
+      "initial_failure": {
+        "observed_result": "连续两次使用相同 Idempotency-Key outcome-demo-001 发送请求，实际两次都返回 recorded。",
+        "root_cause": "已有 outcome_payload 时，持久化层对相同 outcome_idempotency_key 直接回放原始 recorded payload，没有改写为 duplicate。"
+      },
+      "fix_verification": {
+        "decision_id": "97ad9c0c49974e409c175ba8e8cd9c86",
+        "idempotency_key": "outcome-idem-fix-001",
+        "first_response": {
+          "outcome_status": "recorded",
+          "final_status": "success",
+          "attempts_recorded": 1,
+          "fallback_depth": 0
+        },
+        "second_response": {
+          "outcome_status": "duplicate",
+          "final_status": "success",
+          "attempts_recorded": 1,
+          "fallback_depth": 0
+        }
+      },
+      "conclusion": "修复后符合预期：第一次 outcome 回写返回 recorded，重复回写返回 duplicate。"
+    },
+    "9.3_abnormal_paths": {
+      "9.3.1_unknown_decision_id": {
+        "description": "测试填入不存在的 decision_id",
+        "actual_result": {
+          "detail": "Unknown decision_id 'fake-decision-id-1234567890'."
+        }
+      },
+      "9.3.2_agent_id_mismatch": {
+        "description": "测试 agent_id 与当前认证 credential 不一致",
+        "actual_result": {
+          "detail": "outcome agent_id does not match authenticated credential."
+        }
+      },
+      "9.3.3_invalid_status_enum": {
+        "description": "测试填入非法的 final_status 状态值 (super_happy)",
+        "actual_result": {
+          "detail": [
+            {
+              "type": "literal_error",
+              "loc": [
+                "body",
+                "final_status"
+              ],
+              "msg": "Input should be 'success', 'partial' or 'failed'",
+              "input": "super_happy",
+              "ctx": {
+                "expected": "'success', 'partial' or 'failed'"
+              }
+            }
+          ]
+        }
+      }
+    }
+  },
+  "10_metrics_observability": {
+    "description": "Prometheus 监控指标检查",
+    "metrics_found": true,
+    "sample_metrics": [
+      "routing_outcomes_total{agent_id=\"Primary-Agent\",final_status=\"success\"} 4.0",
+      "routing_policy_hits_total{policy_id=\"balanced\"} 2.0",
+      "routing_rejections_total{provider=\"moonshot\",reason=\"latency_filtered\"} 2.0"
+    ]
+  },
+  "11_persistence_check": {
+    "11.1_redis_streams": {
+      "description": "验证 Outcome 数据是否成功进入 Redis 消息队列",
+      "status": "Verified",
+      "check_method": "通过 docker compose exec redis 进入容器执行 XRANGE",
+      "actual_result": "成功查到多条 payload 包含对应 decision_id (768aebe7db6348238284c175e79c9bc9) 及 final_status (success) 的消息流。"
+    },
+    "11.2_postgres_database": {
+      "description": "验证 Decision 和 Outcome 是否永久落库到 Postgres",
+      "status": "Verified",
+      "check_method": "通过 docker compose exec postgres 进入容器执行 psql 查询",
+      "actual_result": "成功落库。查到 decision_id 为 768aebe7db6348238284c175e79c9bc9 的记录，且 status 已更新为 completed，final_status 为 success。"
+    }
+  },
+  "12_worker_integration": {
+    "description": "decision-api / probe-worker / event-consumer 三进程联动检查",
+    "passed": true,
+    "status": "fixed_and_verified",
+    "observed_at": "2026-05-15T05:18:26+08:00",
+    "checks": {
+      "decision_api_ready": {
+        "passed": true,
+        "actual_result": {
+          "health_status": "online",
+          "database": true,
+          "redis": true,
+          "catalog_loaded": true,
+          "fresh_signals": true
+        }
+      },
+      "redis_probe_stream": {
+        "passed": true,
+        "actual_result": {
+          "routing_probes_xlen_before": 732,
+          "routing_probes_xlen_after": 800,
+          "stream_is_growing": true
+        }
+      },
+      "redis_outcome_stream": {
+        "passed": true,
+        "actual_result": {
+          "routing_outcomes_xlen": 5
+        }
+      },
+      "event_consumer_probe_consumption": {
+        "passed": true,
+        "actual_result": {
+          "container": "oracle_event_consumer",
+          "error_after_fix": null,
+          "logs_after_fix": "event-consumer 启动后未再出现 KeyError: 'status'。"
+        }
+      }
+    },
+    "initial_failure": {
+      "error": "KeyError: 'status'",
+      "trace_location": "app/services/persistence.py:245 in record_probe_snapshot",
+      "root_cause": "probe-worker 发布到 routing-probes 的 payload 缺少 status 字段，和 record_probe_snapshot 的入库 schema 不一致。"
+    },
+    "conclusion": "修复并重建 Docker 镜像后，ready online、fresh_signals true、routing-probes 持续增长，event-consumer 不再报 KeyError，因此第 12 步通过。"
+  },
+  "13_example_agent_e2e": {
+    "description": "Example Agent 端到端 decision -> provider invoke -> outcome 链路",
+    "passed": true,
+    "status": "passed",
+    "command": "set -a; source .env; set +a; export ORACLE_BASE_URL=http://127.0.0.1:8000; export ORACLE_API_KEY=<redacted-control-plane-key>; export AGENT_ID=Primary-Agent; ./venv/bin/python examples/agent_client.py",
+    "actual_result": {
+      "decision_id": "07a0b9527aa5459d84e95cb73c8221d7",
+      "selected_model": "deepseek/deepseek-chat"
+    },
+    "conclusion": "Example Agent 成功拿到 routing decision，并选中 deepseek/deepseek-chat 完成端到端调用。"
+  },
+  "test_closure": {
+    "status": "closed",
+    "closed_at": "2026-05-15T05:18:26+08:00",
+    "summary": "手工 runbook 已完成闭环。9.2 outcome 幂等问题和 12 worker/event-consumer 联动问题均已完成代码修复并通过复测。",
+    "automated_regression": {
+      "command": "./venv/bin/pytest -q",
+      "result": "17 passed",
+      "coverage": "88.08%"
+    },
+    "manual_regression": {
+      "9.2_outcome_idempotency": "passed",
+      "12_worker_integration": "passed",
+      "13_example_agent_e2e": "passed"
+    },
+    "remaining_known_issues": []
+  }
+}

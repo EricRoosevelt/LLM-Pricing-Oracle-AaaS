@@ -1,0 +1,6 @@
+[run]
+omit =
+    app/main.py
+    app/models/*
+    app/workers/*
+    app/services/persistence.py

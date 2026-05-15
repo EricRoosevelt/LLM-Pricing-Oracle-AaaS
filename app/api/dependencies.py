@@ -1,82 +1,95 @@
-# app/api/dependencies.py
-import time
-import logging
-from fastapi import Request, HTTPException, Depends
-import redis.asyncio as redis
-from redis.exceptions import RedisError
+from typing import Optional
+
+from fastapi import Depends, Header, HTTPException, Security, status
+
 from app.core.config import settings
-from app.core.security import verify_api_key # 引入鉴权函数
+from app.core.database import AsyncSessionLocal
+from app.core.security import api_key_header
+from app.schemas.routing import AgentPrincipal
+from app.services.control_plane import (
+    AuthenticationError,
+    AuthorizationError,
+    ControlPlaneService,
+    NotFoundError,
+    QuotaExceededError,
+    build_redis_runtime,
+)
+from app.services.persistence import (
+    SqlAlchemyCredentialStore,
+    SqlAlchemyDecisionStore,
+    SqlAlchemyMetadataStore,
+)
 
-# 注意：别忘了在文件开头初始化 redis_client
-redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
 
-# 🚀 把 verify_api_key 作为限流器的前置依赖！
-async def rate_limiter(request: Request, agent_name: str = Depends(verify_api_key)):
-    """
-    工业级限流器：基于 Agent 身份限流，而不是容易被 NAT 误杀的 IP
-    """
-    # 以 Agent Name 和 当前分钟 构建 Redis Key
-    current_minute = int(time.time() // 60)
-    redis_key = f"rate_limit:agent:{agent_name}:{current_minute}"
-    MAX_REQUESTS_PER_MINUTE = 5
+_control_plane_service: Optional[ControlPlaneService] = None
 
+
+def get_control_plane_service() -> ControlPlaneService:
+    global _control_plane_service
+    if _control_plane_service is None:
+        credential_store = SqlAlchemyCredentialStore(
+            AsyncSessionLocal,
+            settings.bootstrap_agent_credentials,
+        )
+        metadata_store = SqlAlchemyMetadataStore(AsyncSessionLocal)
+        decision_store = SqlAlchemyDecisionStore(AsyncSessionLocal)
+        _control_plane_service = build_redis_runtime(
+            credential_store=credential_store,
+            metadata_store=metadata_store,
+            decision_store=decision_store,
+        )
+    return _control_plane_service
+
+
+def get_idempotency_key(
+    idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
+) -> Optional[str]:
+    return idempotency_key
+
+
+async def _authenticate(
+    required_scopes: list[str],
+    api_key: Optional[str],
+    service: ControlPlaneService,
+) -> AgentPrincipal:
     try:
-        async with redis_client.pipeline(transaction=True) as pipe:
-            pipe.incr(redis_key)
-            results = await pipe.execute()
+        return await service.authenticate(api_key, required_scopes=required_scopes)
+    except AuthenticationError as exc:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc)) from exc
+    except AuthorizationError as exc:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc)) from exc
 
-        result = results[0]
-        if result == 1:
-            await redis_client.expire(redis_key, 60)
 
-        if result > MAX_REQUESTS_PER_MINUTE:
-            raise HTTPException(
-                status_code=429,
-                detail=f"Rate limit exceeded for agent '{agent_name}'. Please try again later.",
-                headers={"Retry-After": "60"}
-            )
-    except RedisError as e:
-        logging.error(f"🔴 Redis is down! Rate limiter bypassed. Error: {e}")
+async def get_routing_decision_principal(
+    api_key: Optional[str] = Security(api_key_header),
+    service: ControlPlaneService = Depends(get_control_plane_service),
+) -> AgentPrincipal:
+    return await _authenticate(["routing:decide"], api_key, service)
 
-    # 限流通过，返回 agent_name 给下游
-    return agent_name
 
-'''
-之前的代码-
-# 初始化 Redis 异步连接池
-redis_client = redis.from_url(settings.REDIS_URL, decode_responses=True)
+async def get_routing_outcome_principal(
+    api_key: Optional[str] = Security(api_key_header),
+    service: ControlPlaneService = Depends(get_control_plane_service),
+) -> AgentPrincipal:
+    return await _authenticate(["routing:outcome"], api_key, service)
 
-async def rate_limiter(request: Request):
-    """
-    带极速优化与 Fail-Open 容错机制的工业级限流器
-    """
-    client_ip = request.client.host
-    current_minute = int(time.time() // 60)
-    redis_key = f"rate_limit:{client_ip}:{current_minute}"
-    MAX_REQUESTS_PER_MINUTE = 5
 
-    try:
-        # 使用 Pipeline 保证查询和自增操作的原子性
-        async with redis_client.pipeline(transaction=True) as pipe:
-            pipe.incr(redis_key)
-            results = await pipe.execute()
+async def get_control_principal(
+    api_key: Optional[str] = Security(api_key_header),
+    service: ControlPlaneService = Depends(get_control_plane_service),
+) -> AgentPrincipal:
+    return await _authenticate(["control:read"], api_key, service)
 
-        result = results[0]
-        
-        # 🚀 性能优化：只在每分钟的第 1 次请求时发送 EXPIRE 指令，节省 50% 的 I/O
-        if result == 1:
-            await redis_client.expire(redis_key, 60)
 
-        if result > MAX_REQUESTS_PER_MINUTE:
-            raise HTTPException(
-                status_code=429,
-                detail="Rate limit exceeded. Please try again later.",
-                headers={"Retry-After": "60"}
-            )
-            
-    except RedisError as e:
-        # 🛡️ 容错降级：如果 Redis 宕机，绝不阻塞核心业务，直接 Fail-Open 放行！
-        logging.error(f"🔴 Redis is down! Rate limiter bypassed. Error: {e}")
-
-    return client_ip
-'''
+def service_error_to_http(exc: Exception) -> HTTPException:
+    if isinstance(exc, AuthorizationError):
+        return HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail=str(exc))
+    if isinstance(exc, AuthenticationError):
+        return HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail=str(exc))
+    if isinstance(exc, NotFoundError):
+        return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+    if isinstance(exc, QuotaExceededError):
+        return HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail=str(exc))
+    if isinstance(exc, ValueError):
+        return HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc))
+    return HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail="internal control-plane error")

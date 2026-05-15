@@ -17,3 +17,11 @@ def test_estimate_tokens_edge_cases():
     
     # 边缘测试：哪怕只有 1 个字符，也至少算 1 个 Token
     assert estimate_tokens(1, "unknown/model") == 1
+
+
+def test_estimate_tokens_for_chinese_defaults():
+    assert estimate_tokens(1000, "moonshot/moonshot-v1-32k", "zh") == 700
+
+
+def test_estimate_tokens_for_gemini_chinese():
+    assert estimate_tokens(1000, "gemini/gemini-2.0-flash", "zh") == 550
