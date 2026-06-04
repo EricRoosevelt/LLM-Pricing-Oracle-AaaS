@@ -1,0 +1,11 @@
+flowchart LR
+  task["Agent task constraints"] --> request["Decision request"]
+  request --> control["Routing control plane"]
+  control --> decision["Explainable decision and fallback ladder"]
+  decision --> agent["Agent runtime"]
+  agent --> provider["LLM providers with agent-owned keys"]
+  provider --> result["Model result or provider error"]
+  result --> agent
+  agent --> outcome["Outcome report"]
+  outcome --> control
+  control --> evidence["Audit, metrics, and route learning inputs"]

@@ -1,0 +1,39 @@
+flowchart LR
+    subgraph client ["Client"]
+        agent["AI Agent"]
+    end
+    subgraph gateway ["API Layer"]
+        controlApi["Control Plane API"]
+    end
+    subgraph service ["Core Services"]
+        decisionService["Decision Service"]
+        scoringEngine["Scoring Engine"]
+        probeWorker["Probe Worker"]
+        eventConsumer["Event Consumer"]
+    end
+    subgraph datastore ["Data Stores"]
+        modelCatalog["Model Catalog"]
+        redisSignals["Redis Signals"]
+        postgres["Postgres"]
+    end
+    subgraph external ["External"]
+        llmProviders["LLM Providers"]
+        prometheus["Prometheus Metrics"]
+    end
+    subgraph async ["Event Streams"]
+        redisStreams["Redis Streams"]
+    end
+
+    agent -->|"Decision and outcome API"| controlApi
+    controlApi -->|"Routes requests"| decisionService
+    decisionService -->|"Scores candidates"| scoringEngine
+    scoringEngine -->|"Reads price and capability"| modelCatalog
+    scoringEngine -->|"Reads fresh health"| redisSignals
+    decisionService -->|"Writes decisions and outcomes"| postgres
+    decisionService -.->|"Produces outcome events"| redisStreams
+    redisStreams -.->|"Consumes events"| eventConsumer
+    eventConsumer -->|"Persists snapshots"| postgres
+    probeWorker -.->|"Provider probes"| llmProviders
+    probeWorker -->|"Writes fresh signals"| redisSignals
+    probeWorker -.->|"Produces probe events"| redisStreams
+    decisionService -.->|"Exports route metrics"| prometheus

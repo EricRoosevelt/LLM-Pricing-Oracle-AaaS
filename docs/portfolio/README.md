@@ -7,6 +7,11 @@
 | 文件 | 用途 |
 | --- | --- |
 | [notion-case-study.md](./notion-case-study.md) | 可直接粘贴到 Notion 的主页面文案 |
+| [portfolio.md](./portfolio.md) | 按统一作品集框架重写后的终稿正文 |
+| [evidence-index.md](./evidence-index.md) | 作品集事实和证据来源索引 |
+| [sampling-checklist.md](./sampling-checklist.md) | 待补用户、竞品、录屏和使用数据采样清单 |
+| [product-flow.mmd](./product-flow.mmd) | 产品闭环 FigJam / Mermaid 源文件 |
+| [product-architecture.mmd](./product-architecture.mmd) | 控制面架构 FigJam / Mermaid 源文件 |
 | [architecture.mmd](./architecture.mmd) | 架构图 Mermaid 源文件 |
 | [assets/architecture.svg](./assets/architecture.svg) | 现代架构图可编辑 SVG 源文件 |
 | [api-demo.md](./api-demo.md) | API Demo 请求、响应和讲解词 |
@@ -44,3 +49,11 @@
 - 自动化测试：`17 passed`
 - 覆盖率：`88.08%`
 - 手工验收：Docker 三进程联动、Redis Streams、Postgres 落库、worker integration、Example Agent E2E 均通过
+
+## 可编辑 FigJam
+
+- 产品闭环图与控制面架构图：https://www.figma.com/board/1rKE9qZT13SDmzwoBudhxf
+
+## Notion 终稿页
+
+- https://app.notion.com/p/3751cb002005813b8b86fe11cf67983b
